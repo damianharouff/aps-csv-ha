@@ -44,6 +44,9 @@ async def async_setup_entry(
             APSGridExportYesterdaySensor(coordinator, entry),
             APSSolarGeneratedYesterdaySensor(coordinator, entry),
             APSSolarSelfUsedYesterdaySensor(coordinator, entry),
+            APSCycleGridImportSensor(coordinator, entry),
+            APSCycleGridExportSensor(coordinator, entry),
+            APSCycleSolarGeneratedSensor(coordinator, entry),
         ]
     async_add_entities(entities, update_before_add=True)
 
@@ -271,6 +274,65 @@ class APSSolarSelfUsedYesterdaySensor(_APSSolarBase):
     def native_value(self) -> float | None:
         solar = self._solar
         return solar.self_used_yesterday if solar else None
+
+
+class _APSSolarCycleBase(_APSSolarBase):
+    """Cumulative-within-billing-cycle solar sensor (Energy Dashboard).
+
+    TOTAL_INCREASING resets at each billing cycle boundary; HA's statistics
+    treat the drop as a meter reset, so long-term totals stay correct.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def _cycle_start(self) -> str | None:
+        usage = self._usage
+        return usage.current_bill_cycle_start if usage else None
+
+
+class APSCycleGridImportSensor(_APSSolarCycleBase):
+    """Grid import kWh since the billing cycle started."""
+
+    _attr_name = "APS Current Cycle Grid Import kWh"
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "cycle_grid_import")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.grid_import_since(self._cycle_start()) if solar else None
+
+
+class APSCycleGridExportSensor(_APSSolarCycleBase):
+    """Grid export kWh since the billing cycle started."""
+
+    _attr_name = "APS Current Cycle Grid Export kWh"
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "cycle_grid_export")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.exported_since(self._cycle_start()) if solar else None
+
+
+class APSCycleSolarGeneratedSensor(_APSSolarCycleBase):
+    """Solar production kWh since the billing cycle started."""
+
+    _attr_name = "APS Current Cycle Solar Generated kWh"
+    _attr_icon = "mdi:solar-power-variant"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "cycle_solar_generated")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.generated_since(self._cycle_start()) if solar else None
 
 
 class APSBalanceSensor(_APSBase):

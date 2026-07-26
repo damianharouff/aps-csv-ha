@@ -340,10 +340,10 @@ class APSUsageData:
     @property
     def current_cycle_kwh(self) -> float:
         """Total kWh since the most recent billing cycle start date."""
-        if not self.bill_cycle_dates:
+        cycle_start_str = self.current_bill_cycle_start
+        if not cycle_start_str:
             # Fall back: sum all available series
             return self.period_kwh(len(self.series))
-        cycle_start_str = self.bill_cycle_dates[0].get("billCycleDate", "")
         try:
             cycle_start = datetime.strptime(cycle_start_str, "%Y-%m-%d")
         except ValueError:
@@ -361,7 +361,24 @@ class APSUsageData:
 
     @property
     def current_bill_cycle_start(self) -> str | None:
-        """Start date of the current billing cycle."""
+        """Start date of the current billing cycle.
+
+        billCycleDates lists every cycle boundary in the fetched window,
+        oldest first — the current cycle starts at the most recent boundary
+        that isn't in the future.
+        """
+        starts = []
+        for entry in self.bill_cycle_dates:
+            try:
+                starts.append(
+                    datetime.strptime(entry.get("billCycleDate", ""), "%Y-%m-%d")
+                )
+            except (ValueError, TypeError):
+                pass
+        now = datetime.now()
+        past = [d for d in starts if d <= now]
+        if past:
+            return max(past).strftime("%Y-%m-%d")
         if self.bill_cycle_dates:
             return self.bill_cycle_dates[0].get("billCycleDate")
         return None
@@ -491,6 +508,40 @@ class APSSolarData:
             return None
         val = _ci_get(item, "date", "usageDate", "readDate")
         return str(val) if val else None
+
+    def _since_kwh(self, keys: tuple[str, ...], start_date: str | None) -> float:
+        """Total kWh for the given fields since start_date (inclusive)."""
+        try:
+            start = (
+                datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+            )
+        except (ValueError, TypeError):
+            start = None
+        total = 0.0
+        for item in self.series:
+            if start:
+                try:
+                    item_date = datetime.strptime(
+                        str(_ci_get(item, "date") or ""), "%Y-%m-%d"
+                    )
+                    if item_date < start:
+                        continue
+                except ValueError:
+                    continue
+            total += self._value(item, *keys) or 0.0
+        return round(total, 2)
+
+    def grid_import_since(self, start_date: str | None) -> float:
+        """Grid import kWh since a date (e.g. billing cycle start)."""
+        return self._since_kwh(self._IMPORT, start_date)
+
+    def exported_since(self, start_date: str | None) -> float:
+        """Grid export kWh since a date (e.g. billing cycle start)."""
+        return self._since_kwh(self._EXPORTED, start_date)
+
+    def generated_since(self, start_date: str | None) -> float:
+        """Solar production kWh since a date (e.g. billing cycle start)."""
+        return self._since_kwh(self._GENERATED, start_date)
 
 
 class APSUsageAPI:

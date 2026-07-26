@@ -32,6 +32,9 @@ A custom Home Assistant integration for **Arizona Public Service (APS)** custome
 | Yesterday Grid Export kWh | `sensor.aps_yesterday_grid_export_kwh` | kWh | Solar energy sold back to the grid |
 | Yesterday Solar Generated kWh | `sensor.aps_yesterday_solar_generated_kwh` | kWh | Total solar production |
 | Yesterday Solar Self-Consumed kWh | `sensor.aps_yesterday_solar_self_consumed_kwh` | kWh | Solar energy used on-site |
+| Current Cycle Grid Import kWh | `sensor.aps_current_cycle_grid_import_kwh` | kWh | Cumulative grid import this billing cycle (Energy Dashboard) |
+| Current Cycle Grid Export kWh | `sensor.aps_current_cycle_grid_export_kwh` | kWh | Cumulative grid export this billing cycle (Energy Dashboard) |
+| Current Cycle Solar Generated kWh | `sensor.aps_current_cycle_solar_generated_kwh` | kWh | Cumulative solar production this billing cycle (Energy Dashboard) |
 
 > **Note:** on solar accounts, APS's `totalUsage` (the regular usage sensors) reports **grid import**, not total household consumption. True consumption = Grid Import + Solar Self-Consumed.
 >
@@ -93,13 +96,17 @@ The integration authenticates, auto-detects your active service agreement (and p
 
 ## Energy Dashboard
 
+The Energy Dashboard only accepts **cumulative** energy sensors (`total_increasing`), so use the *Current Cycle* sensors — the *Yesterday* sensors are daily snapshots meant for regular dashboards and automations, and won't appear as selectable sources.
+
 Go to **Settings → Dashboards → Energy**:
 
-- **Grid consumption:** `sensor.aps_yesterday_kwh` (or `sensor.aps_yesterday_grid_import_kwh` on solar accounts)
-- **Return to grid** (solar): `sensor.aps_yesterday_grid_export_kwh`
-- **Solar production** (solar): `sensor.aps_yesterday_solar_generated_kwh`
+- **Grid consumption:** `sensor.aps_current_cycle_grid_import_kwh` (solar) or `sensor.aps_current_billing_cycle_kwh` (non-solar)
+- **Return to grid** (solar): `sensor.aps_current_cycle_grid_export_kwh`
+- **Solar production** (solar): `sensor.aps_current_cycle_solar_generated_kwh`
 
-Note that APS reports data with a ~1-day delay, so Energy Dashboard totals will trail real time.
+Home Assistant computes self-consumed solar automatically (production − export). The cycle sensors reset to zero at each billing-cycle boundary; HA treats that as a normal meter reset, so long-term statistics stay correct.
+
+Two caveats inherent to APS's API: data arrives with a ~1-day delay, and each day's usage lands in statistics at the hour HA polls it — daily/weekly totals are accurate, but hour-by-hour breakdowns are not meaningful.
 
 ---
 
