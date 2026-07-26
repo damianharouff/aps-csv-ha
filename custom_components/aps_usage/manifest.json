@@ -2,15 +2,15 @@
   "domain": "aps_usage",
   "name": "APS Usage",
   "codeowners": [
-    "@Conexo-Casa"
+    "@damianharouff"
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/Conexo-Casa/aps-csv-ha",
+  "documentation": "https://github.com/damianharouff/aps-csv-ha",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/Conexo-Casa/aps-csv-ha/issues",
+  "issue_tracker": "https://github.com/damianharouff/aps-csv-ha/issues",
   "requirements": [
     "cryptography>=41.0.0"
   ],
-  "version": "0.2.1"
+  "version": "0.3.0"
 }

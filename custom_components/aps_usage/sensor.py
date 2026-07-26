@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import APSDataCoordinator
-from .api import APSUsageData
+from .api import APSSolarData, APSUsageData
 from .const import DOMAIN
 
 
@@ -28,19 +28,24 @@ async def async_setup_entry(
 ) -> None:
     """Set up APS Usage sensors."""
     coordinator: APSDataCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            APSYesterdayKwhSensor(coordinator, entry),
-            APSCurrentCycleKwhSensor(coordinator, entry),
-            APSThirtyDayKwhSensor(coordinator, entry),
-            APSOnPeakYesterdaySensor(coordinator, entry),
-            APSOffPeakYesterdaySensor(coordinator, entry),
-            APSBalanceSensor(coordinator, entry),
-            APSDueDateSensor(coordinator, entry),
-            APSLastPaymentSensor(coordinator, entry),
-        ],
-        update_before_add=True,
-    )
+    entities: list[SensorEntity] = [
+        APSYesterdayKwhSensor(coordinator, entry),
+        APSCurrentCycleKwhSensor(coordinator, entry),
+        APSThirtyDayKwhSensor(coordinator, entry),
+        APSOnPeakYesterdaySensor(coordinator, entry),
+        APSOffPeakYesterdaySensor(coordinator, entry),
+        APSBalanceSensor(coordinator, entry),
+        APSDueDateSensor(coordinator, entry),
+        APSLastPaymentSensor(coordinator, entry),
+    ]
+    if coordinator.api.is_solar:
+        entities += [
+            APSGridImportYesterdaySensor(coordinator, entry),
+            APSGridExportYesterdaySensor(coordinator, entry),
+            APSSolarGeneratedYesterdaySensor(coordinator, entry),
+            APSSolarSelfUsedYesterdaySensor(coordinator, entry),
+        ]
+    async_add_entities(entities, update_before_add=True)
 
 
 class _APSBase(CoordinatorEntity, SensorEntity):
@@ -178,6 +183,94 @@ class APSOffPeakYesterdaySensor(_APSBase):
     def native_value(self) -> float | None:
         usage = self._usage
         return usage.off_peak_kwh_yesterday if usage else None
+
+
+class _APSSolarBase(_APSBase):
+    """Base class for solar sensors (only created on solar accounts)."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 2
+
+    @property
+    def _solar(self) -> APSSolarData | None:
+        if self.coordinator.data:
+            return self.coordinator.data.get("solar")
+        return None
+
+    @property
+    def available(self) -> bool:
+        # The solar endpoint is best-effort; go unavailable when it fails
+        return super().available and self._solar is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        solar = self._solar
+        if solar:
+            attrs["latest_data_date"] = solar.latest_date
+        return attrs
+
+
+class APSGridImportYesterdaySensor(_APSSolarBase):
+    """kWh drawn from the grid on the latest complete day."""
+
+    _attr_name = "APS Yesterday Grid Import kWh"
+    _attr_icon = "mdi:transmission-tower-import"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "grid_import_yesterday")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.grid_import_yesterday if solar else None
+
+
+class APSGridExportYesterdaySensor(_APSSolarBase):
+    """Solar kWh sold back to the grid on the latest complete day."""
+
+    _attr_name = "APS Yesterday Grid Export kWh"
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "grid_export_yesterday")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.exported_yesterday if solar else None
+
+
+class APSSolarGeneratedYesterdaySensor(_APSSolarBase):
+    """Total solar kWh produced on the latest complete day."""
+
+    _attr_name = "APS Yesterday Solar Generated kWh"
+    _attr_icon = "mdi:solar-power"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "solar_generated_yesterday")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.generated_yesterday if solar else None
+
+
+class APSSolarSelfUsedYesterdaySensor(_APSSolarBase):
+    """Solar kWh consumed on-site on the latest complete day."""
+
+    _attr_name = "APS Yesterday Solar Self-Consumed kWh"
+    _attr_icon = "mdi:home-lightning-bolt-outline"
+
+    def __init__(self, coordinator: APSDataCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "solar_self_used_yesterday")
+
+    @property
+    def native_value(self) -> float | None:
+        solar = self._solar
+        return solar.self_used_yesterday if solar else None
 
 
 class APSBalanceSensor(_APSBase):

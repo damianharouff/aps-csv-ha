@@ -44,6 +44,12 @@ USER_DETAILS_URL = f"{SITECORE_BASE}/api/sitecore/sitecorereactapi/GetAllUserDet
 # mobi.aps.com — daily usage charges (GET with query params, discovered from Dashboard.js)
 DAILY_USAGE_URL = "https://mobi.aps.com/ccb-billing/v1/getdailyusagecharges"
 
+# mobi.aps.com — solar generation/export data (POST, used by the dashboard
+# when the selected service agreement has isSolar=true)
+SOLAR_USAGE_URL = (
+    "https://mobi.aps.com/customerhistoryservices/v1/getsummarizedusagesolardata"
+)
+
 # CSS_USER constant from Accounts/Dashboard.js bundle
 CSS_USER = "APSCOM"
 
@@ -141,8 +147,21 @@ def _extract_sasp_candidates(details: dict) -> list[dict]:
             ),
             "sa_end": str(_ci_get(sasp, "sAEndDate") or ""),
             "sa_type": str(
-                _ci_get(sasp, "sAType", "sATypeCd", "sATypeDesc", "sATypeDescription")
+                _ci_get(
+                    sasp, "sAType", "sATypeCd", "sATypeCode", "sATypeDesc",
+                    "sATypeDescription",
+                )
                 or ""
+            ),
+            "meter": str(_ci_get(sasp, "meterBadgeNumber", "meterNum") or ""),
+            "is_solar": str(_ci_get(sasp, "isSolar") or "").lower()
+            in ("true", "y", "yes", "1"),
+            # APS spells this "sARatePlancCode" in Dashboard.js — match both
+            "rate_plan_code": str(
+                _ci_get(sasp, "sARatePlancCode", "sARatePlanCode") or ""
+            ),
+            "sa_start": str(
+                _ci_get(sasp, "sAStartDate", "sARatePlanEffDate") or ""
             ),
         }
         key = (entry["sa_id"], entry["sp_id"])
@@ -193,6 +212,29 @@ def _choose_sasp(candidates: list[dict]) -> dict | None:
     non_solar = [c for c in pool if "SOLAR" not in c["sa_type"].upper()] or pool
     with_sp = [c for c in non_solar if c["sp_id"]] or non_solar
     return with_sp[0]
+
+
+def _find_production_meter(candidates: list[dict], chosen: dict) -> dict | None:
+    """Locate the solar production meter's SASP entry.
+
+    Solar accounts carry a second meter (production) with its own service
+    point. It's the active SASP whose SP differs from the consumption one,
+    preferring entries whose type hints at solar/generation.
+    """
+    others = [
+        c
+        for c in candidates
+        if c["sp_id"]
+        and c["sp_id"] != chosen["sp_id"]
+        and _sa_is_active(c["sa_end"])
+    ]
+    if not others:
+        return None
+    for c in others:
+        sa_type = c["sa_type"].upper()
+        if any(hint in sa_type for hint in ("SOLAR", "GEN", "PROD")):
+            return c
+    return others[0]
 
 
 class APSAuthError(Exception):
@@ -322,6 +364,86 @@ class APSUsageData:
         return None
 
 
+class APSSolarData:
+    """Container for parsed solar generation data (per-day Series).
+
+    Field names come from the Dashboard.js solar chart mapping. Actual and
+    estimated readings arrive in separate fields; values here sum both.
+    """
+
+    _IMPORT = ("totalAPSEnergyUsed", "totalAPSEnergyUsedEstimated")
+    _GENERATED = ("totalPowerGenerated", "totalPowerGeneratedEstimated")
+    _EXPORTED = ("totalGenerationSold", "totalGenerationSoldEstimated")
+    _SELF_USED = ("totalGenerationUsed", "totalGenerationUsedEstimated")
+
+    def __init__(self, series: list[dict]) -> None:
+        self.series = series
+
+    @staticmethod
+    def _value(item: dict, *keys: str) -> float | None:
+        total = None
+        for key in keys:
+            raw = _ci_get(item, key)
+            if raw in (None, ""):
+                continue
+            try:
+                total = (total or 0.0) + float(raw)
+            except (ValueError, TypeError):
+                continue
+        return total
+
+    @property
+    def _latest_item(self) -> dict | None:
+        """Most recent day (excluding today when possible) with any real data."""
+        candidates = self.series[:-1] or self.series
+        for item in reversed(candidates):
+            for keys in (
+                self._IMPORT,
+                self._GENERATED,
+                self._EXPORTED,
+                self._SELF_USED,
+            ):
+                if self._value(item, *keys):
+                    return item
+        return None
+
+    def _latest(self, keys: tuple[str, ...]) -> float | None:
+        item = self._latest_item
+        if item is None:
+            return None
+        # 0.0 is meaningful here (e.g. nothing exported on a cloudy day)
+        return round(self._value(item, *keys) or 0.0, 2)
+
+    @property
+    def grid_import_yesterday(self) -> float | None:
+        """kWh drawn from the grid on the latest complete day."""
+        return self._latest(self._IMPORT)
+
+    @property
+    def generated_yesterday(self) -> float | None:
+        """Total solar kWh produced on the latest complete day."""
+        return self._latest(self._GENERATED)
+
+    @property
+    def exported_yesterday(self) -> float | None:
+        """Solar kWh sold back to the grid on the latest complete day."""
+        return self._latest(self._EXPORTED)
+
+    @property
+    def self_used_yesterday(self) -> float | None:
+        """Solar kWh consumed on-site on the latest complete day."""
+        return self._latest(self._SELF_USED)
+
+    @property
+    def latest_date(self) -> str | None:
+        """Date of the latest complete day of solar data."""
+        item = self._latest_item
+        if item is None:
+            return None
+        val = _ci_get(item, "date", "usageDate", "readDate")
+        return str(val) if val else None
+
+
 class APSUsageAPI:
     """APS Usage API — uses web B2C token with mobi.aps.com billing endpoints."""
 
@@ -343,6 +465,17 @@ class APSUsageAPI:
         self._sp_id: str | None = None
         self._premise_id: str | None = None
         self._premise_address: str | None = None
+        # Solar details (production meter = separate SASP with its own SP)
+        self._is_solar: bool = False
+        self._meter_number: str | None = None
+        self._rate_plan_code: str | None = None
+        self._sa_start: str | None = None
+        self._prod_meter: dict | None = None
+
+    @property
+    def is_solar(self) -> bool:
+        """Whether the account has solar (per the isSolar SASP flag)."""
+        return self._is_solar
 
     # ------------------------------------------------------------------
     # Authentication
@@ -467,13 +600,26 @@ class APSUsageAPI:
             self._sp_id = chosen["sp_id"] or None
             self._premise_id = chosen["premise_id"] or None
             self._premise_address = chosen["premise_address"]
+            self._meter_number = chosen["meter"] or None
+            self._rate_plan_code = chosen["rate_plan_code"] or None
+            self._sa_start = chosen["sa_start"] or None
+            self._is_solar = chosen["is_solar"] or any(
+                c["is_solar"] for c in candidates
+            )
+            self._prod_meter = (
+                _find_production_meter(candidates, chosen)
+                if self._is_solar
+                else None
+            )
             _LOGGER.debug(
-                "APS: Selected SASP — SA=%s SP=%s premise=%s type=%s "
-                "(%d candidate(s) found)",
+                "APS: Selected SASP — SA=%s SP=%s premise=%s type=%s solar=%s "
+                "prod_meter=%s (%d candidate(s) found)",
                 self._sa_id,
                 self._sp_id,
                 self._premise_id,
                 chosen["sa_type"],
+                self._is_solar,
+                bool(self._prod_meter),
                 len(candidates),
             )
         else:
@@ -588,6 +734,113 @@ class APSUsageAPI:
             premise_id=self._premise_id or "",
             premise_address=self._premise_address or "",
         )
+
+    async def get_solar_usage(self, days: int = 60) -> APSSolarData | None:
+        """Fetch solar generation/export data (solar accounts only).
+
+        POST /customerhistoryservices/v1/getsummarizedusagesolardata — the
+        endpoint the APS dashboard uses when the selected service agreement
+        has isSolar=true. Requires both the utility meter and the separate
+        production meter (its own SASP/SP).
+
+        Best-effort: returns None (with a log entry) instead of raising, so
+        a solar endpoint hiccup never breaks the core usage sensors.
+        """
+        await self._ensure_authenticated()
+
+        if not self._is_solar:
+            return None
+        if not self._prod_meter or not self._meter_number:
+            _LOGGER.warning(
+                "APS: Account is flagged solar but no production meter was "
+                "found (utility meter present: %s). Please report at "
+                "https://github.com/damianharouff/aps-csv-ha/issues",
+                bool(self._meter_number),
+            )
+            return None
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=days)
+        start_str = start_dt.strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+
+        payload = {
+            "accountId": self._account_id or "",
+            "cssUser": CSS_USER,
+            "userName": self._username,
+            "billCycleStartDate": start_str,
+            "billCycleEndDate": end_str,
+            "utilityMeterNumber": self._meter_number,
+            "utilityMeterSPId": self._sp_id,
+            "prodMeterNumber": self._prod_meter["meter"],
+            "prodMeterSPId": self._prod_meter["sp_id"],
+            "saId": self._sa_id,
+            "premiseId": self._premise_id or "",
+            "displayType": "D",
+            "ratePlan": [
+                {
+                    "servicePlan": self._rate_plan_code or "",
+                    "startDate": self._sa_start or start_str,
+                    "endDate": end_str,
+                }
+            ],
+        }
+
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._b2c_access_token}",
+            "Ocp-Apim-Subscription-Key": OCP_APIM_KEY,
+            "Origin": SITECORE_BASE,
+            "Referer": f"{SITECORE_BASE}/en/Residential/Account/Overview/Dashboard",
+            "User-Agent": _USER_AGENT,
+        }
+
+        _LOGGER.debug(
+            "APS: Fetching solar usage (utility meter + production meter)"
+        )
+
+        try:
+            async with self._session.post(
+                SOLAR_USAGE_URL, json=payload, headers=headers
+            ) as resp:
+                if resp.status == 401:
+                    _LOGGER.warning("APS: 401 on solar POST — re-authenticating.")
+                    await self.authenticate()
+                    headers["Authorization"] = f"Bearer {self._b2c_access_token}"
+                    async with self._session.post(
+                        SOLAR_USAGE_URL, json=payload, headers=headers
+                    ) as retry:
+                        if retry.status != 200:
+                            body = await retry.text()
+                            _LOGGER.warning(
+                                "APS: Solar usage API HTTP %s: %s",
+                                retry.status,
+                                body[:200],
+                            )
+                            return None
+                        data = await retry.json(content_type=None)
+                elif resp.status != 200:
+                    body = await resp.text()
+                    _LOGGER.warning(
+                        "APS: Solar usage API HTTP %s: %s", resp.status, body[:200]
+                    )
+                    return None
+                else:
+                    data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("APS: Connection error fetching solar usage: %s", err)
+            return None
+
+        series = _as_list(_ci_get(data, "Series"))
+        if not series:
+            _LOGGER.warning(
+                "APS: Solar usage response had no Series. Keys: %s",
+                sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            )
+            return None
+
+        return APSSolarData(series)
 
     async def get_financial_data(self) -> dict[str, Any]:
         """Return financial data extracted from GetAllUserDetails.

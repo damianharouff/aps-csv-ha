@@ -53,14 +53,18 @@ class APSDataCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_update_data(self) -> dict:
-        """Fetch usage + financial data and return combined dict."""
+        """Fetch usage, financial, and (if solar) generation data."""
         try:
             usage: APSUsageData = await self.api.get_daily_usage(DAYS_OF_HISTORY)
             financial: dict = await self.api.get_financial_data()
             # Attach rate plan from usage data
             if usage.series:
                 financial["rate_plan"] = usage.series[-1].get("effRateSchedule")
-            return {"usage": usage, "financial": financial}
+            # Solar generation/export — best-effort, None on any failure
+            solar = None
+            if self.api.is_solar:
+                solar = await self.api.get_solar_usage(DAYS_OF_HISTORY)
+            return {"usage": usage, "financial": financial, "solar": solar}
         except APSAuthError as err:
             raise UpdateFailed(f"APS authentication error: {err}") from err
         except aiohttp.ClientError as err:

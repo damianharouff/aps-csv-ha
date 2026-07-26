@@ -1,14 +1,17 @@
 # APS Usage — Home Assistant Integration
 
-[![GitHub Release](https://img.shields.io/github/release/conexocasa/aps-csv-ha.svg)](https://github.com/conexocasa/aps-csv-ha/releases)
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A custom Home Assistant integration for **Arizona Public Service (APS)** customers that provides real-time energy usage and billing sensors — no APS mobile app or CSV download required.
+A custom Home Assistant integration for **Arizona Public Service (APS)** customers that provides energy usage, solar generation, and billing sensors — no APS mobile app or CSV download required.
+
+> This project began as a fork of [Conexo-Casa/aps-csv-ha](https://github.com/Conexo-Casa/aps-csv-ha) and now develops independently, adding robust service-agreement detection and solar import/export support.
 
 ---
 
 ## Sensors
+
+### All accounts
 
 | Sensor | Entity ID | Unit | Description |
 |--------|-----------|------|-------------|
@@ -20,6 +23,17 @@ A custom Home Assistant integration for **Arizona Public Service (APS)** custome
 | Current Balance | `sensor.aps_current_balance` | USD | Outstanding bill amount |
 | Bill Due Date | `sensor.aps_bill_due_date` | date | Next payment due date |
 | Last Payment | `sensor.aps_last_payment` | USD | Most recent payment amount |
+
+### Solar accounts (created automatically when APS flags your service agreement as solar)
+
+| Sensor | Entity ID | Unit | Description |
+|--------|-----------|------|-------------|
+| Yesterday Grid Import kWh | `sensor.aps_yesterday_grid_import_kwh` | kWh | Energy drawn from the grid |
+| Yesterday Grid Export kWh | `sensor.aps_yesterday_grid_export_kwh` | kWh | Solar energy sold back to the grid |
+| Yesterday Solar Generated kWh | `sensor.aps_yesterday_solar_generated_kwh` | kWh | Total solar production |
+| Yesterday Solar Self-Consumed kWh | `sensor.aps_yesterday_solar_self_consumed_kwh` | kWh | Solar energy used on-site |
+
+> **⚠️ Solar support is experimental.** It was implemented from the APS dashboard's JavaScript (`getsummarizedusagesolardata` endpoint) but has not yet been verified against a live solar account. If you have solar and these sensors are unavailable or wrong, please [open an issue](https://github.com/damianharouff/aps-csv-ha/issues) with your debug logs — account numbers redacted.
 
 All sensors update **every hour**. Energy sensors (kWh) are compatible with the [HA Energy Dashboard](https://www.home-assistant.io/docs/energy/).
 
@@ -41,7 +55,7 @@ All sensors update **every hour**. Energy sensors (kWh) are compatible with the 
 2. Go to **Integrations** → click the **⋮ menu** (top right) → **Custom repositories**.
 3. Enter the repository URL:
    ```
-   https://github.com/conexocasa/aps-csv-ha
+   https://github.com/damianharouff/aps-csv-ha
    ```
    Select **Integration** as the category and click **Add**.
 4. Search for **APS Usage** in the HACS integrations list and click **Download**.
@@ -50,31 +64,15 @@ All sensors update **every hour**. Energy sensors (kWh) are compatible with the 
 
 ### Option B — Manual Installation
 
-1. Download the latest release from the [Releases page](https://github.com/conexocasa/aps-csv-ha/releases) or clone this repository.
+1. Clone this repository or download it as a ZIP.
 2. Copy the `custom_components/aps_usage/` folder into your Home Assistant config directory:
    ```
    config/
    └── custom_components/
        └── aps_usage/
-           ├── __init__.py
-           ├── api.py
-           ├── config_flow.py
-           ├── const.py
-           ├── manifest.json
-           └── sensor.py
    ```
 3. **Restart Home Assistant.**
 4. Follow [Configuration](#configuration) below.
-
-> **Tip:** If you have SSH or terminal access to your HA host, you can install with two commands:
-> ```bash
-> mkdir -p /config/custom_components/aps_usage
-> for f in __init__.py api.py config_flow.py const.py manifest.json sensor.py; do
->   curl -sL "https://raw.githubusercontent.com/conexocasa/aps-csv-ha/main/custom_components/aps_usage/$f" \
->     -o "/config/custom_components/aps_usage/$f"
-> done
-> ```
-> Then restart HA.
 
 ---
 
@@ -85,64 +83,31 @@ All sensors update **every hour**. Energy sensors (kWh) are compatible with the 
 3. Enter your **APS.com username** and **password** (the same credentials you use at [aps.com](https://www.aps.com) or the APS mobile app).
 4. Click **Submit**.
 
-The integration will authenticate, auto-detect your active service agreement, and create all sensors. No account ID or meter number is needed — these are discovered automatically from your account.
+The integration authenticates, auto-detects your active service agreement (and production meter, for solar accounts), and creates all sensors. No account ID or meter number is needed — these are discovered automatically.
 
-> **Multiple service addresses:** If you have more than one APS service address under a single account, the integration automatically selects the **currently active** service (the one with no end date). All sensors reflect that address. The `premise_address` attribute on each sensor shows which address is being used.
+> **Multiple service addresses / agreements:** If your account has more than one service agreement (multiple addresses, solar production meters, closed accounts), the integration selects the **active consumption agreement** automatically. The `premise_address` attribute on each sensor shows which address is in use.
 
 ---
 
 ## Energy Dashboard
 
-The energy kWh sensors are compatible with Home Assistant's built-in Energy Dashboard.
+Go to **Settings → Dashboards → Energy**:
 
-To add them:
-1. Go to **Settings → Dashboards → Energy**.
-2. Under **Electricity grid → Grid consumption**, click **Add consumption**.
-3. Select `sensor.aps_current_billing_cycle_kwh` for billing-cycle tracking, or `sensor.aps_yesterday_kwh` for daily tracking.
+- **Grid consumption:** `sensor.aps_yesterday_kwh` (or `sensor.aps_yesterday_grid_import_kwh` on solar accounts)
+- **Return to grid** (solar): `sensor.aps_yesterday_grid_export_kwh`
+- **Solar production** (solar): `sensor.aps_yesterday_solar_generated_kwh`
+
+Note that APS reports data with a ~1-day delay, so Energy Dashboard totals will trail real time.
 
 ---
 
 ## Sensor Attributes
 
-### Energy Sensors (kWh)
-All energy sensors carry these extra attributes:
-
-| Attribute | Example | Description |
-|-----------|---------|-------------|
-| `account_id` | `0539389128` | APS account number |
-| `premise_address` | `1049 N VILLA NUEVA DR...` | Service address |
-| `latest_data_date` | `2026-05-13` | Date of most recent data |
-| `bill_cycle_start` | `2026-04-09` | Start of current billing cycle |
-
-`sensor.aps_current_billing_cycle_kwh` also includes:
-
-| Attribute | Example | Description |
-|-----------|---------|-------------|
-| `rate_plan` | `R3-47` | APS rate plan code |
-
-### Balance Sensor (`sensor.aps_current_balance`)
-
-| Attribute | Example | Description |
-|-----------|---------|-------------|
-| `due_date` | `06-01-2026` | Payment due date |
-| `new_charges` | `0` | New charges this period |
-| `auto_pay` | `true` | AutoPay enrolled |
-| `budget_billing` | `true` | Budget Billing enrolled |
-| `last_payment_amount` | `303.52` | Most recent payment |
-| `last_payment_date` | `04-30-2026` | Date of last payment |
-
-### Last Payment Sensor (`sensor.aps_last_payment`)
-
-| Attribute | Example | Description |
-|-----------|---------|-------------|
-| `last_payment_date` | `04-30-2026` | Date of last payment |
-| `account_id` | `0539389128` | APS account number |
+All energy sensors carry `account_id`, `premise_address`, `latest_data_date`, and `bill_cycle_start`. `sensor.aps_current_billing_cycle_kwh` adds `rate_plan` (e.g. `R3-47`). The balance sensor carries `due_date`, `new_charges`, `auto_pay`, `budget_billing`, and last-payment details.
 
 ---
 
-## Lovelace Cards
-
-Here is a minimal Lovelace configuration to display your APS data:
+## Lovelace Example
 
 ```yaml
 type: entities
@@ -162,15 +127,13 @@ entities:
     name: Current Balance
   - entity: sensor.aps_bill_due_date
     name: Due Date
-  - entity: sensor.aps_last_payment
-    name: Last Payment
 ```
 
 ---
 
 ## Update Frequency
 
-The integration polls APS **once per hour**. APS updates usage data daily (not real-time), so energy readings reflect usage through the **previous day**. Balance and billing data reflects your current APS.com account balance at the time of the last poll.
+The integration polls APS **once per hour**. APS updates usage data daily (not real-time), so energy readings reflect usage through the **previous day**. Balance and billing data reflect your APS.com balance at the last poll.
 
 ---
 
@@ -179,7 +142,7 @@ The integration polls APS **once per hour**. APS updates usage data daily (not r
 ### "Invalid Auth" error during setup
 - Verify your credentials work at [aps.com](https://www.aps.com/en/Authorization/Login).
 - APS rate-limits login attempts. Wait 5–10 minutes and try again.
-- Ensure you're using your **APS.com username** (not your email address or account number).
+- Use your **APS.com username** (not your email address or account number).
 
 ### Integration in "Setup Retry" / sensors unavailable
 Check **Settings → System → Logs** and filter for `aps_usage`. Common causes:
@@ -188,8 +151,14 @@ Check **Settings → System → Logs** and filter for `aps_usage`. Common causes
 |-------|-------|-----|
 | `Authentication failed` | Wrong password / rate limited | Re-check credentials; wait 10 min |
 | `Connection error` | HA can't reach aps.com | Check HA network / DNS |
-| `No active service agreement` | All SAs have end dates | Open a GitHub issue with your account type |
+| `No active service agreement` | Unrecognized account structure | See below |
 | `Login request blocked` | Imperva WAF challenge | Retry in 15 minutes (auto-recovers) |
+
+### "No active service agreement found"
+The integration handles many account layouts (multiple agreements, solar production meters, placeholder end dates, single-item responses). If yours still isn't recognized, the log will contain a warning starting with `APS: No service agreement (SASP) found` that includes the **key structure** of the API response (values stripped — no personal data). Please [open an issue](https://github.com/damianharouff/aps-csv-ha/issues) and paste that warning.
+
+### Solar sensors unavailable
+The solar endpoint is best-effort: if it fails, the core usage sensors keep working and the solar sensors go unavailable. Enable debug logging (below) and look for `APS: Solar usage API` or `no production meter` warnings, then open an issue with what you find.
 
 ### Enable debug logging
 Add to `configuration.yaml` and restart:
@@ -199,7 +168,6 @@ logger:
   logs:
     custom_components.aps_usage: debug
 ```
-Then check **Settings → System → Logs** and filter for `aps_usage`.
 
 ---
 
@@ -213,19 +181,23 @@ This integration was reverse-engineered from the APS website (`aps.com`) and the
 3. **Session establishment:** `GET {redirectUrl}` — establishes ASP.NET session cookies.
 4. **Token retrieval:** `GET https://www.aps.com/api/sitecore/sitecorereactapi/GetAllUserDetails` — returns the Azure AD B2C access token (`B2C_AccessToken`), account details, and `getSASPListByAccountID` containing all service agreements with meter numbers.
 
+### Service Agreement Selection
+Every service agreement / service point (SASP) in the account is collected — tolerating single-item dict responses, key-casing differences, and far-future placeholder end dates. The **active consumption agreement** is chosen (non-solar type, has a service point). On solar accounts, the **production meter** is identified as the active SASP with a distinct service point.
+
 ### Usage Data
-- Endpoint discovered in `Accounts/Dashboard.js` (loaded by the APS account dashboard page):
-  ```
-  GET https://mobi.aps.com/ccb-billing/v1/getdailyusagecharges
-  ```
-  Query parameters: `action=read`, `accountNumber`, `userName`, `emailAddress`, `sAID` (Service Agreement ID), `spId` (Service Point ID), `startDate`, `endDate`, `cSSUser=APSCOM`
+```
+GET https://mobi.aps.com/ccb-billing/v1/getdailyusagecharges
+```
+Query parameters: `action=read`, `accountNumber`, `userName`, `emailAddress`, `sAID` (Service Agreement ID), `spId` (Service Point ID), `startDate`, `endDate`, `cSSUser=APSCOM`. The response contains a `series` array (one entry per day) with `totalUsage`, `onPeakUsage`, `offPeakUsage`, temperature, and charge amounts, plus `billCycleDates` marking billing cycle boundaries.
 
-- The **active service agreement** is identified from `getSASPListByAccountID` as the entry with an empty `sAEndDate` field.
-
-- The response contains a `series` array (one entry per day) with `totalUsage`, `onPeakUsage`, `offPeakUsage`, temperature, and charge amounts, plus `billCycleDates` marking billing cycle boundaries.
+### Solar Data (solar accounts)
+```
+POST https://mobi.aps.com/customerhistoryservices/v1/getsummarizedusagesolardata
+```
+JSON body includes both meters: `utilityMeterNumber`/`utilityMeterSPId` and `prodMeterNumber`/`prodMeterSPId`, plus `saId`, `premiseId`, `displayType: "D"`, a date range, and a `ratePlan` array. The response's `Series` array carries per-day `totalAPSEnergyUsed` (grid import), `totalPowerGenerated` (production), `totalGenerationSold` (export), and `totalGenerationUsed` (self-consumed), each with actual + estimated variants.
 
 ### Financial Data
-- Extracted directly from the `GetAllUserDetails` response — `getAccountFinancialDetails` contains `currentBalance`, `dueDt`, `lastPayAmt`, `lastPayDt`, and `newCharges`. No additional API call is needed.
+Extracted directly from the `GetAllUserDetails` response — `getAccountFinancialDetails` contains `currentBalance`, `dueDt`, `lastPayAmt`, `lastPayDt`, and `newCharges`. No additional API call is needed.
 
 ---
 
@@ -234,7 +206,7 @@ This integration was reverse-engineered from the APS website (`aps.com`) and the
 - Credentials are stored in **Home Assistant's encrypted config entry storage**. They are never logged or transmitted to any third party.
 - All network requests go directly to `www.aps.com` and `mobi.aps.com`.
 - The integration is **read-only** — it makes no changes to your APS account.
-- The integration requires `cryptography>=41.0.0` (a standard Python security library) for RSA password encryption.
+- Diagnostic log output strips values from API responses (key names only).
 
 ---
 
@@ -253,6 +225,8 @@ Pull requests are welcome! When reporting a bug, please include:
 
 ---
 
-## Disclaimer
+## Credits & Disclaimer
+
+Originally based on [Conexo-Casa/aps-csv-ha](https://github.com/Conexo-Casa/aps-csv-ha).
 
 This integration is not affiliated with, endorsed by, or supported by Arizona Public Service Company (APS). It uses undocumented private APIs that APS may change at any time. Use at your own risk.
