@@ -132,10 +132,14 @@ def _extract_sasp_candidates(details: dict) -> list[dict]:
         if not isinstance(sasp, dict):
             return
         sa_id = _ci_get(sasp, "sAID")
-        if sa_id in (None, ""):
+        sp_type = str(_ci_get(sasp, "sPType") or "")
+        # Production-meter entries (sPType=PROD) may carry no SA ID; keep
+        # them anyway — they're needed to build the solar data request.
+        if sa_id in (None, "") and sp_type.upper() != "PROD":
             return
         entry = {
-            "sa_id": str(sa_id),
+            "sa_id": str(sa_id or ""),
+            "sp_type": sp_type,
             "sp_id": str(_ci_get(sasp, "sPID") or ""),
             "premise_id": str(
                 _ci_get(sasp, "premiseID") or _ci_get(premise, "premiseID") or ""
@@ -187,7 +191,9 @@ def _extract_sasp_candidates(details: dict) -> list[dict]:
     # Fallback: some account types nest SASP data differently — scan everything.
     def walk(node: Any, premise: Any = None) -> None:
         if isinstance(node, dict):
-            if _ci_get(node, "sAID") not in (None, ""):
+            if _ci_get(node, "sAID") not in (None, "") or str(
+                _ci_get(node, "sPType") or ""
+            ).upper() == "PROD":
                 add(node, premise)
             nearest = node if _ci_get(node, "premiseID") not in (None, "") else premise
             for value in node.values():
@@ -201,14 +207,18 @@ def _extract_sasp_candidates(details: dict) -> list[dict]:
 
 
 def _choose_sasp(candidates: list[dict]) -> dict | None:
-    """Pick the best SASP: active first, then non-solar, then having an SP ID.
+    """Pick the consumption SASP: has an SA, not a production meter, active.
 
-    Solar accounts can carry a generation SA alongside the consumption one;
-    usage data lives on the consumption (non-solar) agreement.
+    Solar accounts carry a production-meter entry (sPType=PROD, often with
+    no SA ID) alongside the consumption one; usage data lives on the
+    consumption agreement.
     """
-    if not candidates:
+    consumption = [
+        c for c in candidates if c["sa_id"] and c["sp_type"].upper() != "PROD"
+    ]
+    if not consumption:
         return None
-    pool = [c for c in candidates if _sa_is_active(c["sa_end"])] or candidates
+    pool = [c for c in consumption if _sa_is_active(c["sa_end"])] or consumption
     non_solar = [c for c in pool if "SOLAR" not in c["sa_type"].upper()] or pool
     with_sp = [c for c in non_solar if c["sp_id"]] or non_solar
     return with_sp[0]
@@ -217,10 +227,16 @@ def _choose_sasp(candidates: list[dict]) -> dict | None:
 def _find_production_meter(candidates: list[dict], chosen: dict) -> dict | None:
     """Locate the solar production meter's SASP entry.
 
-    Solar accounts carry a second meter (production) with its own service
-    point. It's the active SASP whose SP differs from the consumption one,
-    preferring entries whose type hints at solar/generation.
+    The dashboard identifies it by sPType == "PROD". Fall back to any other
+    active SASP with a distinct service point, preferring solar-typed ones.
     """
+    prod_typed = [
+        c
+        for c in candidates
+        if c["sp_type"].upper() == "PROD" and (c["sp_id"] or c["meter"])
+    ]
+    if prod_typed:
+        return prod_typed[0]
     others = [
         c
         for c in candidates
@@ -235,6 +251,39 @@ def _find_production_meter(candidates: list[dict], chosen: dict) -> dict | None:
         if any(hint in sa_type for hint in ("SOLAR", "GEN", "PROD")):
             return c
     return others[0]
+
+
+def _payload_flags_solar(details: dict) -> bool:
+    """Whether any premise carries a solar marker.
+
+    The dashboard treats an account as solar via premise-level flags
+    (isProductionMeter / isBidirectionalMeter / isSolar) rather than a
+    field on the SASP entries themselves.
+    """
+    found = False
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            for key in ("isProductionMeter", "isBidirectionalMeter", "isSolar"):
+                if str(_ci_get(node, key) or "").lower() in (
+                    "true",
+                    "y",
+                    "yes",
+                    "1",
+                ):
+                    found = True
+                    return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(details)
+    return found
 
 
 class APSAuthError(Exception):
@@ -603,8 +652,13 @@ class APSUsageAPI:
             self._meter_number = chosen["meter"] or None
             self._rate_plan_code = chosen["rate_plan_code"] or None
             self._sa_start = chosen["sa_start"] or None
-            self._is_solar = chosen["is_solar"] or any(
-                c["is_solar"] for c in candidates
+            self._is_solar = (
+                chosen["is_solar"]
+                or any(
+                    c["is_solar"] or c["sp_type"].upper() == "PROD"
+                    for c in candidates
+                )
+                or _payload_flags_solar(details)
             )
             self._prod_meter = (
                 _find_production_meter(candidates, chosen)

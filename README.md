@@ -33,7 +33,9 @@ A custom Home Assistant integration for **Arizona Public Service (APS)** custome
 | Yesterday Solar Generated kWh | `sensor.aps_yesterday_solar_generated_kwh` | kWh | Total solar production |
 | Yesterday Solar Self-Consumed kWh | `sensor.aps_yesterday_solar_self_consumed_kwh` | kWh | Solar energy used on-site |
 
-> **⚠️ Solar support is experimental.** It was implemented from the APS dashboard's JavaScript (`getsummarizedusagesolardata` endpoint) but has not yet been verified against a live solar account. If you have solar and these sensors are unavailable or wrong, please [open an issue](https://github.com/damianharouff/aps-csv-ha/issues) with your debug logs — account numbers redacted.
+> **Note:** on solar accounts, APS's `totalUsage` (the regular usage sensors) reports **grid import**, not total household consumption. True consumption = Grid Import + Solar Self-Consumed.
+>
+> Solar support has been verified against a live APS solar account (TOU with demand charge, separate production meter). If your solar sensors are unavailable or wrong, please [open an issue](https://github.com/damianharouff/aps-csv-ha/issues) with your debug logs — account numbers redacted.
 
 All sensors update **every hour**. Energy sensors (kWh) are compatible with the [HA Energy Dashboard](https://www.home-assistant.io/docs/energy/).
 
@@ -182,7 +184,7 @@ This integration was reverse-engineered from the APS website (`aps.com`) and the
 4. **Token retrieval:** `GET https://www.aps.com/api/sitecore/sitecorereactapi/GetAllUserDetails` — returns the Azure AD B2C access token (`B2C_AccessToken`), account details, and `getSASPListByAccountID` containing all service agreements with meter numbers.
 
 ### Service Agreement Selection
-Every service agreement / service point (SASP) in the account is collected — tolerating single-item dict responses, key-casing differences, and far-future placeholder end dates. The **active consumption agreement** is chosen (non-solar type, has a service point). On solar accounts, the **production meter** is identified as the active SASP with a distinct service point.
+Every service agreement / service point (SASP) in the account is collected — tolerating single-item dict responses, key-casing differences, far-future placeholder end dates, and production-meter entries that carry no SA ID. The **active consumption agreement** is chosen (non-PROD service point, has an SA). Solar is detected the same way the APS dashboard does it: premise-level flags (`isProductionMeter` / `isBidirectionalMeter`) and a SASP entry with `sPType: "PROD"` — that PROD entry is the **production meter** used for solar data requests.
 
 ### Usage Data
 ```
